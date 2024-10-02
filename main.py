@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 import os
 from langchain_community.graphs import Neo4jGraph
-from langchain_community.document_loaders import WikipediaLoader
+from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import TokenTextSplitter
 from langchain_openai import ChatOpenAI
 from langchain_experimental.graph_transformers import LLMGraphTransformer
@@ -40,44 +40,46 @@ kg = Neo4jGraph(
     password=NEO4J_PASSWORD,
 )
 
-# # read the wikipedia page for the Roman Empire
-raw_documents = WikipediaLoader(query="The Roman empire").load()
-
-
-# # # # Define chunking strategy
-text_splitter = TokenTextSplitter(chunk_size=512, chunk_overlap=24)
-documents = text_splitter.split_documents(raw_documents[:3])
-print(documents)
-
-llm_transformer = LLMGraphTransformer(llm=chat)
-graph_documents = llm_transformer.convert_to_graph_documents(documents)
-
-# store to neo4j
-kg.add_graph_documents(
-    graph_documents,
-    include_source=True,
-    baseEntityLabel=True,
-)
+# # read from a file
+# raw_documents = TextLoader('fixtures/math.php').load()
+#
+# # Define chunking strategy
+# text_splitter = TokenTextSplitter(chunk_size=512, chunk_overlap=24)
+# documents = text_splitter.split_documents(raw_documents)
+# print(documents)
+#
+# llm_transformer = LLMGraphTransformer(llm=chat)
+# graph_documents = llm_transformer.convert_to_graph_documents(documents)
+#
+# # store to neo4j
+# kg.add_graph_documents(
+#     graph_documents,
+#     include_source=True,
+#     baseEntityLabel=True, # Adds __Entity__ tag
+# )
 
 # Hybrid Retrieval for RAG
 # create vector index
 vector_index = Neo4jVector.from_existing_graph(
-    OpenAIEmbeddings(),
+    OpenAIEmbeddings(
+        api_key=OPENAI_API_KEY,
+    ),
     search_type="hybrid",
     node_label="Document",
     text_node_properties=["text"],
     embedding_node_property="embedding",
+    url=NEO4J_URI,
+    username=NEO4J_USERNAME,
+    password=NEO4J_PASSWORD,
 )
 
-
-# Extract entities from text
-class Entities(BaseModel):
-    """Identifying information about entities."""
+# Extract utilities from text
+class Utilities(BaseModel):
+    """Identifying information about utilities."""
 
     names: List[str] = Field(
         ...,
-        description="All the person, organization, or business entities that "
-        "appear in the text",
+        description="All the code utilities a user can use in the code.",
     )
 
 
@@ -85,7 +87,7 @@ prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are extracting organization and person entities from the text.",
+            "You are extracting utilities a user may need in code to solve something.",
         ),
         (
             "human",
@@ -94,16 +96,17 @@ prompt = ChatPromptTemplate.from_messages(
         ),
     ]
 )
-entity_chain = prompt | chat.with_structured_output(Entities)
+entity_chain = prompt | chat.with_structured_output(Utilities)
 
 # Test it out:
 # res = entity_chain.invoke(
-#     {"question": "In the year of 123 there was an emperor who did not like to rule."}
+#     {"question": "I need to find the factorial of a number."}
 # ).names
-# # print(res)
+#
+# print(res)
 
 # Retriever
-kg.query("CREATE FULLTEXT INDEX entity IF NOT EXISTS FOR (e:__Entity__) ON EACH [e.id]")
+# kg.query("CREATE FULLTEXT INDEX entity IF NOT EXISTS FOR (e:__Entity__) ON EACH [e.id]")
 
 
 def generate_full_text_query(input: str) -> str:
@@ -123,21 +126,20 @@ def generate_full_text_query(input: str) -> str:
     full_text_query += f" {words[-1]}~2"
     return full_text_query.strip()
 
-
-# Fulltext index query
+# # Fulltext index query
 def structured_retriever(question: str) -> str:
     """
     Collects the neighborhood of entities mentioned
     in the question
     """
     result = ""
-    entities = entity_chain.invoke({"question": question})
-    for entity in entities.names:
-        print(f" Getting Entity: {entity}")
+    utilities = entity_chain.invoke({"question": question})
+    for utility in utilities.names:
+        print(f" Getting Entity: {utility}")
         response = kg.query(
             """CALL db.index.fulltext.queryNodes('entity', $query, {limit:2})
             YIELD node,score
-            CALL {
+            CALL (node, node) {
               WITH node
               MATCH (node)-[r:!MENTIONS]->(neighbor)
               RETURN node.id + ' - ' + type(r) + ' -> ' + neighbor.id AS output
@@ -148,14 +150,14 @@ def structured_retriever(question: str) -> str:
             }
             RETURN output LIMIT 50
             """,
-            {"query": generate_full_text_query(entity)},
+            {"query": generate_full_text_query(utility)},
         )
         # print(response)
         result += "\n".join([el["output"] for el in response])
     return result
 
 
-# print(structured_retriever("Who is Octavian?"))
+# print(structured_retriever("How can I know if a number is a prime?"))
 
 
 # Final retrieval step
@@ -203,7 +205,7 @@ _search_query = RunnableBranch(
             chat_history=lambda x: _format_chat_history(x["chat_history"])
         )
         | CONDENSE_QUESTION_PROMPT
-        | ChatOpenAI(temperature=0)
+        | chat
         | StrOutputParser(),
     ),
     # Else, we have no chat history, so just pass through the question
@@ -233,7 +235,7 @@ chain = (
 # TEST it all out!
 res_simple = chain.invoke(
     {
-        "question": "How did the Roman empire fall?",
+        "question": "I have a number, how can I know if is it a prime?",
     }
 )
 
@@ -249,3 +251,6 @@ print(f"\n Results === {res_simple}\n\n")
 # )
 
 # print(f"\n === {res_hist}\n\n")
+
+# Close the connection cuz yeah
+kg._driver.close()

@@ -2,19 +2,21 @@ from dotenv import dotenv_values
 
 env_vars = dotenv_values(".env")
 
-OPENAI_API_KEY = env_vars.get("OPENAI_API_KEY")
+def env(key: str, default: str = None) -> str:
+    value = env_vars.get(key)
 
-if OPENAI_API_KEY is None:
-    raise ValueError("OPENAI_API_KEY is not set")
+    if value is not None:
+        return value
 
-NEO4J_URI = env_vars.get("NEO4J_URL")
+    if default is not None:
+        return default
 
-if NEO4J_URI is None:
-    raise ValueError("NEO4J_URI is not set")
+    raise ValueError(f"Environment variable {key} not found")
 
-NEO4J_USERNAME = env_vars.get("NEO4J_USERNAME")
+OPENAI_API_KEY = env("OPENAI_API_KEY")
 
-if NEO4J_USERNAME is None:
-    raise ValueError("NEO4J_USERNAME is not set")
+NEO4J_URI = env("NEO4J_URI")
 
-NEO4J_PASSWORD = env_vars.get("NEO4J_PASSWORD")
+NEO4J_USERNAME = env("NEO4J_USERNAME")
+
+NEO4J_PASSWORD = env("NEO4J_PASSWORD")
